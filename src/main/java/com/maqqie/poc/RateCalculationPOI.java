@@ -15,7 +15,17 @@ import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
 public class RateCalculationPOI {
 
+    private static XSSFWorkbook excelWorkBook;
+    private static FormulaEvaluator formulaEvaluator;
+    private static DecimalFormat amountFormat;
+
     public static void main(String[] args) throws IOException {
+        ClassLoader classloader = Thread.currentThread().getContextClassLoader();
+
+        excelWorkBook = new XSSFWorkbook(classloader.getResourceAsStream("Excel1.xlsm"));
+        formulaEvaluator = excelWorkBook.getCreationHelper().createFormulaEvaluator();
+        amountFormat = new DecimalFormat("#.00");
+        amountFormat.setRoundingMode(RoundingMode.HALF_UP);
 
         StopWatch duration = new StopWatch();
         duration.start();
@@ -26,46 +36,83 @@ public class RateCalculationPOI {
         System.out.println("Total duration: " + duration);
     }
 
-    private static void doCalculation() throws IOException {
-        ClassLoader classloader = Thread.currentThread().getContextClassLoader();
-
-        XSSFWorkbook excelWorkBook = new XSSFWorkbook(classloader.getResourceAsStream("Excel1.xlsm"));
-        FormulaEvaluator formulaEvaluator = excelWorkBook.getCreationHelper().createFormulaEvaluator();
-
-        DecimalFormat df = new DecimalFormat("#.##");
-        df.setRoundingMode(RoundingMode.HALF_UP);
-
+    private static void doCalculation() {
         // Calculate bruto uurloon for 100 hourly rates.
-        for (double hourlyRate = 1.00; hourlyRate < 100; hourlyRate++) {
-            double totalPivotGoalSeek;
+        for (double hourlyRateInput = 20; hourlyRateInput < 150; hourlyRateInput++) {
+            setWbInputHourlyRate(hourlyRateInput);
 
-            setWbInputHourlyRate(excelWorkBook, hourlyRate);
-
-            double testBrutoUurloonValue = hourlyRate; //To bring values closer
-            setWorkbookCalculationBrutoUurloon(excelWorkBook, testBrutoUurloonValue);
+            double testBrutoUurloon = hourlyRateInput -1; //To bring values closer
+            setWbCalculationBrutoUurloon(excelWorkBook, testBrutoUurloon);
             formulaEvaluator.evaluateAll();
 
-            totalPivotGoalSeek = hourlyRate - (readWbCalculationE8(excelWorkBook) + readWbCalculationF24(excelWorkBook) + readWbCalculationF30(excelWorkBook) + readWbCalculationF35(excelWorkBook));
+            // comment out one of them, don't run concurrently, as POI seems to cache evaluations so last one is always fastest.
+            calculateWithOriginalAgorithm(hourlyRateInput, testBrutoUurloon);
+            calculateWithExcelLikeAlgorithm(hourlyRateInput, testBrutoUurloon);
 
-
-            StopWatch uurloonCalculationStopwatch = new StopWatch();
-            uurloonCalculationStopwatch.start();
-            while (!((testBrutoUurloonValue - totalPivotGoalSeek < 0.001 && testBrutoUurloonValue - totalPivotGoalSeek > -0.001))) { //limit
-                testBrutoUurloonValue = totalPivotGoalSeek; // reducing the difference between F37 and the pivotValue.
-                setWorkbookCalculationBrutoUurloon(excelWorkBook, testBrutoUurloonValue);
-                evaluateAllFormulaCells(excelWorkBook);
-                totalPivotGoalSeek = hourlyRate -
-                        (readWbCalculationE8(excelWorkBook) +
-                        readWbCalculationF24(excelWorkBook) +
-                        readWbCalculationF30(excelWorkBook) + readWbCalculationF35(excelWorkBook));
-            }
-            uurloonCalculationStopwatch.stop();
-
-            System.out.println("Goal seek achieved; hourlyRate input: " + hourlyRate + " Bruto uurloon calculated: " + df.format(testBrutoUurloonValue) + ", duration: " + uurloonCalculationStopwatch);
         }
     }
 
-    private static void setWbInputHourlyRate(XSSFWorkbook excelWorkBook, double hourlyRate) {
+    /**
+     * Original algorithm uses a (bit) different algorithm than the original Excel.
+     */
+    private static double calculateWithOriginalAgorithm(double hourlyRateInput, double testBrutoUurloon) {
+
+        StopWatch duration = new StopWatch();
+        duration.start();
+        double totalPivotGoalSeek = hourlyRateInput - (readWbCalculationE8() + readWbCalculationF24() + readWbCalculationF30()
+                + readWbCalculationF35());
+        while (!((testBrutoUurloon - totalPivotGoalSeek < 0.001 && testBrutoUurloon - totalPivotGoalSeek > -0.001))) { //limit
+            testBrutoUurloon = totalPivotGoalSeek; // reducing the difference between F37 and the pivotValue.
+            setWbCalculationBrutoUurloon(excelWorkBook, testBrutoUurloon);
+            evaluateAllFormulaCells(excelWorkBook);
+            totalPivotGoalSeek = hourlyRateInput - (readWbCalculationE8() + readWbCalculationF24() + readWbCalculationF30() + readWbCalculationF35());
+        }
+        duration.stop();
+
+        System.out.println("calculateWithOriginalAgorithm hourlyRate input: " + hourlyRateInput + " Bruto uurloon: " + amountFormat.format(testBrutoUurloon) + ", duration: " + duration);
+
+        return testBrutoUurloon;
+    }
+
+    private static double calculateWithExcelLikeAlgorithm(double hourlyRateInput, double testBrutoUurloon) {
+
+        StopWatch duration = new StopWatch();
+        duration.start();
+        double goalSeekToAlmostZero = calculateTotalPivotGoalSeek(testBrutoUurloon, hourlyRateInput);
+        while (goalSeekToAlmostZero > 0.001 || goalSeekToAlmostZero <  - 0.001) {
+            testBrutoUurloon -= goalSeekToAlmostZero;
+
+            setWbCalculationBrutoUurloon(excelWorkBook, testBrutoUurloon);
+            evaluateAllFormulaCells(excelWorkBook);
+
+            goalSeekToAlmostZero = calculateTotalPivotGoalSeek(testBrutoUurloon, hourlyRateInput);
+        }
+        duration.stop();
+
+        System.out.println("calculateWithExcelLikeAlgorithm hourlyRate input: " + hourlyRateInput + " Bruto uurloon: " + amountFormat.format(testBrutoUurloon) + ", duration: " + duration);
+
+        return testBrutoUurloon;
+    }
+
+
+    private static void setWbCalculationBrutoUurloon(XSSFWorkbook excelWorkBook, double input) {
+        XSSFSheet calculationSheet = excelWorkBook.getSheetAt(2);
+        XSSFRow brutoUurloonRow = calculationSheet.getRow(36);
+        XSSFCell brutoUurloonCell = brutoUurloonRow.getCell(5);
+        brutoUurloonCell.setCellValue(input);
+    }
+
+    private static double calculateTotalPivotGoalSeek(double brutoUurloonInput, double hourlyRateInput) {
+        return brutoUurloonInput -
+                (hourlyRateInput
+                        - readWbCalculationE8()
+                        - readWbCalculationF24()
+                        - readWbCalculationF30()
+                        - readWbCalculationF35()
+                );
+    }
+
+    private static void setWbInputHourlyRate(double hourlyRate) {
 
         XSSFSheet inputSheet = excelWorkBook.getSheetAt(0);
 
@@ -75,14 +122,8 @@ public class RateCalculationPOI {
 
     }
 
-    private static void setWorkbookCalculationBrutoUurloon(XSSFWorkbook excelWorkBook, double input) {
-        XSSFSheet calculationSheet = excelWorkBook.getSheetAt(2);
-        XSSFRow brutoUurloonRow = calculationSheet.getRow(36);
-        XSSFCell brutoUUrloonCell = brutoUurloonRow.getCell(5);
-        brutoUUrloonCell.setCellValue(input);
-    }
 
-    private static double readWbCalculationE8(XSSFWorkbook excelWorkBook) {
+    private static double readWbCalculationE8() {
 
         XSSFSheet calculationSheet = excelWorkBook.getSheetAt(2);
         XSSFRow E8Row = calculationSheet.getRow(7);
@@ -94,7 +135,7 @@ public class RateCalculationPOI {
         //return E8;
     }
 
-    private static double readWbCalculationF24(XSSFWorkbook excelWorkBook) {
+    private static double readWbCalculationF24() {
 
         XSSFSheet calculationSheet = excelWorkBook.getSheetAt(2);
         XSSFRow F24Row = calculationSheet.getRow(23);
@@ -107,7 +148,7 @@ public class RateCalculationPOI {
         //return F24;
     }
 
-    private static double readWbCalculationF30(XSSFWorkbook excelWorkBook) {
+    private static double readWbCalculationF30() {
 
         XSSFSheet calculationSheet = excelWorkBook.getSheetAt(2);
         XSSFRow F30Row = calculationSheet.getRow(29);
@@ -120,7 +161,7 @@ public class RateCalculationPOI {
         //return F30;
     }
 
-    private static double readWbCalculationF35(XSSFWorkbook excelWorkBook) {
+    private static double readWbCalculationF35() {
 
         XSSFSheet calculationSheet = excelWorkBook.getSheetAt(2);
         XSSFRow F35Row = calculationSheet.getRow(34);
